@@ -1,8 +1,11 @@
 /* -*- P4_16 -*- */
+// This program will be modified to implement Queue for bandwidth control
 #include <core.p4>
 #include <v1model.p4>
 
 const bit<16> TYPE_IPV4 = 0x800;
+
+
 
 /*************************************************************************
 *********************** H E A D E R S  ***********************************
@@ -21,7 +24,8 @@ header ethernet_t {
 header ipv4_t {
     bit<4>    version;
     bit<4>    ihl;
-    bit<8>    diffserv;
+    bit<6>    diffserv;
+    bit<2>    ecn;
     bit<16>   totalLen;
     bit<16>   identification;
     bit<3>    flags;
@@ -34,7 +38,8 @@ header ipv4_t {
 }
 
 struct metadata {
-    /* empty */
+    
+    bit<32> meter_tag;
 }
 
 struct headers {
@@ -88,9 +93,14 @@ control MyVerifyChecksum(inout headers hdr, inout metadata meta) {
 control MyIngress(inout headers hdr,
                   inout metadata meta,
                   inout standard_metadata_t standard_metadata) {
+     direct_meter<bit<32>>(MeterType.packets) my_meter;
 
     action drop() {
         mark_to_drop(standard_metadata);
+    }
+
+    action m_action() {
+        my_meter.read(meta.meter_tag);
     }
 
     action ipv4_forward(macAddr_t dstAddr, egressSpec_t port) {
@@ -122,14 +132,51 @@ control MyIngress(inout headers hdr,
         default_action = NoAction();
     }
 
-    apply {
 
-        //only if IPV4 the rule is applied. Therefore other packets will not be forwarded.
-        if (hdr.ipv4.isValid()){
-            ipv4_lpm.apply();
-
+    table m_read {
+        key = {
+            hdr.ipv4.diffserv: exact;
         }
+        actions = {
+            m_action;
+            NoAction;
+        }
+        default_action = NoAction;
+        meters = my_meter;
+        size = 16384;
     }
+
+    table m_filter {
+        key = {
+            meta.meter_tag: exact;
+        }
+        actions = {
+            drop;
+            NoAction;
+        }
+        default_action = drop;
+        size = 16;
+    }
+
+    apply {
+        //only if IPV4 the rule is applied. Therefore other packets will not be forwarded.
+        if(hdr.ipv4.isValid()){
+        // Lookup destination address in LPM table
+        ipv4_lpm.apply();
+        if(hdr.ipv4.diffserv==0x00){
+            m_read.apply();
+            m_filter.apply();
+        }             
+      }
+
+    }
+    // apply {
+
+    //     //only if IPV4 the rule is applied. Therefore other packets will not be forwarded.
+    //     if (hdr.ipv4.isValid()){
+
+    //     }
+    // }
 }
 
 /*************************************************************************
@@ -153,6 +200,7 @@ control MyComputeChecksum(inout headers hdr, inout metadata meta) {
             { hdr.ipv4.version,
 	      hdr.ipv4.ihl,
               hdr.ipv4.diffserv,
+              hdr.ipv4.ecn,
               hdr.ipv4.totalLen,
               hdr.ipv4.identification,
               hdr.ipv4.flags,
